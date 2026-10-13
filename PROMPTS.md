@@ -5,6 +5,59 @@ Worklogs URL: `https://github.com/AddiKQ/Worklogs`. Its helper script is `script
 
 ---
 
+## 0. Universal brief for any coding engine
+
+Paste this into any agent or coding tool (Claude Code, Codex, Cursor, Copilot agent, anything that can run git and shell). It explains the repository and says exactly what to read. Prepend it to any of the prompts below, or use it alone and add your request at the end.
+
+```
+# Worklogs: the work tracker you report to
+
+Repository: https://github.com/AddiKQ/Worklogs (branch: main)
+
+Worklogs is not a codebase. It is a git-native issue tracker for other repositories.
+One task = one markdown file. The folder it sits in is its status:
+
+  repos/<repo-name>/backlog/   not started
+  repos/<repo-name>/active/    claimed by a worker
+  repos/<repo-name>/review/    worker says done, orchestrator has not accepted
+  repos/<repo-name>/blocked/   cannot proceed, reason is in the worklog
+  repos/<repo-name>/done/      orchestrator accepted
+
+Each task file has YAML front matter (id, repo, title, status, priority P0..P3, owner, branch, pr)
+and sections: Goal, Context, Acceptance criteria (checkboxes), Result, Worklog.
+Every status change is one git commit with the message prefix [<repo>#<id>], so git log is the audit trail.
+
+Two roles exist. A WORKER takes one task, does the work in the target repository, and hands it back.
+An ORCHESTRATOR writes tasks, reviews results, merges worker branches, and is the only one who marks done.
+
+## Read these files, in this order, before doing anything
+1. CLAUDE.md          which role you are and the rules everyone follows (short)
+2. AGENT.md           if you are a worker: the step-by-step protocol
+   ORCHESTRATOR.md    if you are an orchestrator
+3. repos/<repo>/README.md   how to get, branch, test and PR the target repository
+4. the task file itself     once you have claimed or been given one
+5. PROMPTS.md         only if you need the ready-made prompts or the onboarding snippet
+
+## The only tool
+scripts/wl   (run `scripts/wl help`). It pulls, edits the task file, commits and pushes in one step.
+  worker:        next <repo> | claim <repo> <id> | log <repo> <id> "msg" | finish <repo> <id> --branch B --pr URL -m "msg" | move <repo> <id> blocked -m "why"
+  orchestrator:  new <repo> "title" -p P1 | save "msg" | inbox | merge <branch> | add-repo <name> <url> | snippet <name>
+  anyone:        board [repo] | feed [n] | show <repo> <id>
+Set WL_OWNER to your session URL or a short name first, so the worklog records who did what.
+
+## Hard rules
+- Never hand-edit front matter or move task files by hand. Use scripts/wl.
+- Touch only repos/<your-repo>/. Never delete a task file.
+- Workers stop at review/. Only the orchestrator moves a task to done/.
+- Work on main in Worklogs. If a push to main is refused, push to a branch named claude/<repo>-<id> and say so; the orchestrator merges it.
+- If your session starts in the target repository, clone Worklogs next to it (`git clone https://github.com/AddiKQ/Worklogs ../Worklogs`) and run `../Worklogs/scripts/wl ...`.
+
+## Your assignment
+<one of: "Work on <repo>" | "Work on <repo>#<id>" | "Triage worklogs" | "Create tasks for <repo>: ..." | "Onboard this repository to Worklogs as <repo>">
+```
+
+---
+
 ## A. Session starts in the target repository
 
 Use when you open a session in the code repository itself. The session clones Worklogs next to the code and reports there.

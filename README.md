@@ -13,7 +13,7 @@ A git-native work tracker for Claude agents working across many repositories.
 CLAUDE.md               entry point for any agent: pick a role, read the right doc
 AGENT.md                worker protocol
 ORCHESTRATOR.md         orchestrator protocol
-PROMPTS.md              copy-paste prompts for worker, orchestrator and onboarding sessions
+PROMPTS.md              universal brief for any coding engine, plus worker, orchestrator and onboarding prompts
 scripts/wl              the only tool you need (new, next, claim, log, finish, move, board, inbox, merge, feed, add-repo, snippet, save)
 templates/              task, repo README and target-repo CLAUDE.md section templates
 repos/<name>/README.md  how to work on that repository
