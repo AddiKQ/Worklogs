@@ -1,0 +1,329 @@
+#!/usr/bin/env bash
+# wl — Worklogs helper. Every status change goes through here.
+# Run from anywhere inside the Worklogs checkout.
+set -euo pipefail
+
+ROOT="$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)"
+REPOS="$ROOT/repos"
+STATUSES="backlog active review blocked done"
+TODAY="$(date -u +%Y-%m-%d)"
+OWNER="${WL_OWNER:-$(git -C "$ROOT" config user.name 2>/dev/null || true)}"
+OWNER="${OWNER:-${USER:-unknown}}"
+
+die()  { echo "wl: $*" >&2; exit 1; }
+note() { echo "wl: $*" >&2; }
+
+usage() {
+  cat <<'EOF'
+usage: wl <command> [args]
+
+worker
+  next   <repo> [n]                       top n backlog tasks, best first (default 5)
+  claim  <repo> <id>                      backlog|blocked -> active, stamps owner, commits, pushes
+  log    <repo> <id> "<message>"          append a worklog line, commit, push
+  finish <repo> <id> [--branch B] [--pr URL] [-m "<msg>"]
+                                          active -> review, records branch/PR, commits, pushes
+  move   <repo> <id> <status> [-m "<msg>"] any -> status, commits, pushes
+
+orchestrator
+  new    <repo> "<title>" [-p P0..P3]     create a backlog task from the template (not committed)
+  save   ["<commit message>"]             commit everything under repos/ and push
+  inbox                                   tasks in review/ and blocked/, plus unmerged worker branches
+  merge  <branch>                         merge origin/<branch> into the current branch, push
+  add-repo <name> <github-url>            scaffold repos/<name>/ (not committed)
+
+anyone
+  board  [repo]                           every task by status
+  feed   [n]                              last n commits touching repos/ (default 20)
+  show   <repo> <id>                      print the task file path
+
+env
+  WL_OWNER     who you are (session URL or short name). Default: git user.name
+  WL_NO_PUSH=1 commit but do not push (local experiments)
+EOF
+}
+
+# ---------- helpers ----------
+
+current_branch() { git -C "$ROOT" rev-parse --abbrev-ref HEAD; }
+
+repo_dir() {
+  local d="$REPOS/$1"
+  [ -d "$d" ] || die "unknown repo '$1'. Known: $(ls "$REPOS" 2>/dev/null | tr '\n' ' ')"
+  echo "$d"
+}
+
+norm_id() { printf '%04d' "$((10#${1#\#}))"; }
+
+find_task() { # repo id -> path
+  local d id m n
+  d="$(repo_dir "$1")"; id="$(norm_id "$2")"
+  m="$(ls "$d"/*/"$id"-*.md 2>/dev/null || true)"
+  [ -n "$m" ] || die "no task $id in $1"
+  n="$(printf '%s\n' "$m" | wc -l)"
+  [ "$n" -eq 1 ] || die "task $id exists in several folders:"$'\n'"$m"
+  echo "$m"
+}
+
+status_of() { basename "$(dirname "$1")"; }
+
+field() { # file key
+  awk -v k="$2" '
+    NR==1 { if ($0!="---") exit; next }
+    $0=="---" { exit }
+    index($0, k ":")==1 { sub(/^[^:]*:[ \t]*/, ""); print; exit }
+  ' "$1"
+}
+
+set_field() { # file key value
+  local f="$1" k="$2" v="$3"
+  awk -v k="$k" -v v="$v" '
+    BEGIN { fm=0 }
+    NR==1 && $0=="---" { fm=1; print; next }
+    fm==1 && $0=="---" { fm=2; print; next }
+    fm==1 && index($0, k ":")==1 { print k ": " v; next }
+    { print }
+  ' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+}
+
+log_line() { # file message
+  [ -n "$(tail -c1 "$1")" ] && echo >> "$1"
+  printf -- '- %s %s: %s\n' "$TODAY" "$OWNER" "$2" >> "$1"
+}
+
+valid_status() {
+  case " $STATUSES " in *" $1 "*) return 0;; esac
+  die "bad status '$1'. One of: $STATUSES"
+}
+
+refresh() { # rebase onto remote tracking branch if it exists
+  local br; br="$(current_branch)"
+  git -C "$ROOT" diff --quiet || die "uncommitted changes in the checkout. Commit them (wl save) or stash first."
+  if git -C "$ROOT" fetch -q origin "$br" 2>/dev/null; then
+    git -C "$ROOT" rebase -q "origin/$br" \
+      || { git -C "$ROOT" rebase --abort; die "rebase conflict on $br. See AGENT.md > Conflicts."; }
+  fi
+}
+
+push_retry() {
+  local br i; br="$(current_branch)"
+  [ "${WL_NO_PUSH:-}" = 1 ] && { note "WL_NO_PUSH=1, not pushing"; return 0; }
+  for i in 1 2 3 4; do
+    if git -C "$ROOT" fetch -q origin "$br" 2>/dev/null; then
+      git -C "$ROOT" rebase -q "origin/$br" \
+        || { git -C "$ROOT" rebase --abort; die "rebase conflict on $br. See AGENT.md > Conflicts."; }
+    fi
+    git -C "$ROOT" push -q -u origin "$br" && return 0
+    sleep $((i * 2))
+  done
+  die "push failed after 4 attempts"
+}
+
+commit_push() { # message
+  git -C "$ROOT" add -A "$REPOS"
+  if git -C "$ROOT" diff --cached --quiet; then note "nothing to commit"; return 0; fi
+  git -C "$ROOT" commit -q -m "$1"
+  note "committed: $1"
+  push_retry
+}
+
+tag() { echo "[$1#$(norm_id "$2")]"; }
+
+row() { # file
+  local f="$1"
+  printf '%-8s %s  %-3s %-50.50s %s\n' \
+    "$(status_of "$f")" "$(basename "$f" .md | cut -c1-4)" "$(field "$f" priority)" \
+    "$(field "$f" title)" "$(field "$f" owner)"
+}
+
+# ---------- commands ----------
+
+cmd_show() { find_task "$1" "$2"; }
+
+cmd_next() {
+  local d n f
+  d="$(repo_dir "$1")"; n="${2:-5}"
+  for f in "$d"/backlog/*.md; do
+    [ -e "$f" ] || continue
+    printf '%s\t%s\n' "$(field "$f" priority)" "$f"
+  done | sort | head -n "$n" | while IFS=$'\t' read -r _ f; do row "$f"; done
+}
+
+cmd_claim() {
+  local repo="$1" id f st d title
+  id="$(norm_id "$2")"
+  refresh
+  f="$(find_task "$repo" "$id")"; st="$(status_of "$f")"
+  case "$st" in backlog|blocked) ;; *) die "task $id is '$st', not claimable (owner: $(field "$f" owner))";; esac
+  d="$(dirname "$(dirname "$f")")"
+  git -C "$ROOT" mv "$f" "$d/active/$(basename "$f")"
+  f="$d/active/$(basename "$f")"
+  set_field "$f" status active
+  set_field "$f" owner "$OWNER"
+  set_field "$f" updated "$TODAY"
+  log_line "$f" "claimed"
+  title="$(field "$f" title)"
+  commit_push "$(tag "$repo" "$id") claim: $title"
+  echo "$f"
+}
+
+cmd_log() {
+  local repo="$1" id f msg
+  id="$(norm_id "$2")"; msg="${3:-}"
+  [ -n "$msg" ] || die "log needs a message"
+  refresh
+  f="$(find_task "$repo" "$id")"
+  log_line "$f" "$msg"
+  set_field "$f" updated "$TODAY"
+  commit_push "$(tag "$repo" "$id") log: $msg"
+}
+
+cmd_move() { # repo id status [-m msg]
+  local repo="$1" id to msg="" f from d title
+  id="$(norm_id "$2")"; to="$3"; shift 3
+  while [ $# -gt 0 ]; do case "$1" in -m) msg="$2"; shift 2;; *) die "unknown option $1";; esac; done
+  valid_status "$to"
+  refresh
+  f="$(find_task "$repo" "$id")"; from="$(status_of "$f")"
+  [ "$from" != "$to" ] || die "task $id is already in $to"
+  d="$(dirname "$(dirname "$f")")"
+  git -C "$ROOT" mv "$f" "$d/$to/$(basename "$f")"
+  f="$d/$to/$(basename "$f")"
+  set_field "$f" status "$to"
+  set_field "$f" updated "$TODAY"
+  log_line "$f" "$from -> $to${msg:+: $msg}"
+  title="$(field "$f" title)"
+  commit_push "$(tag "$repo" "$id") $to: ${msg:-$title}"
+  echo "$f"
+}
+
+cmd_finish() { # repo id [--branch B] [--pr URL] [-m msg]
+  local repo="$1" id branch="" pr="" msg="" f st
+  id="$(norm_id "$2")"; shift 2
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --branch) branch="$2"; shift 2;;
+      --pr)     pr="$2"; shift 2;;
+      -m)       msg="$2"; shift 2;;
+      *) die "unknown option $1";;
+    esac
+  done
+  refresh
+  f="$(find_task "$repo" "$id")"; st="$(status_of "$f")"
+  [ "$st" = active ] || die "task $id is '$st', only active tasks can be finished"
+  [ -n "$branch" ] && set_field "$f" branch "$branch"
+  [ -n "$pr" ] && set_field "$f" pr "$pr"
+  git -C "$ROOT" add -A "$REPOS"
+  if ! git -C "$ROOT" diff --cached --quiet; then
+    git -C "$ROOT" commit -q -m "$(tag "$repo" "$id") result: $(field "$f" title)"
+  fi
+  cmd_move "$repo" "$id" review ${msg:+-m "$msg"}
+}
+
+cmd_new() { # repo "title" [-p P2]
+  local repo="$1" title="$2" pri="P2" d last id slug f esc_title
+  shift 2
+  while [ $# -gt 0 ]; do case "$1" in -p|--priority) pri="$2"; shift 2;; *) die "unknown option $1";; esac; done
+  case "$pri" in P0|P1|P2|P3) ;; *) die "priority must be P0..P3";; esac
+  d="$(repo_dir "$repo")"
+  last="$(ls "$d"/*/*.md 2>/dev/null | xargs -rn1 basename | grep -oE '^[0-9]{4}' | sort -n | tail -1 || true)"
+  id="$(printf '%04d' $((10#${last:-0} + 1)))"
+  slug="$(printf '%s' "$title" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//')"
+  if [ "${#slug}" -gt 40 ]; then slug="$(printf '%s' "${slug:0:41}" | sed -E 's/-[^-]*$//')"; fi
+  [ -n "$slug" ] || slug="task"
+  f="$d/backlog/$id-$slug.md"
+  esc_title="$(printf '%s' "$title" | sed 's/[&/\]/\\&/g')"
+  sed -e "s/{{ID}}/$id/g" -e "s/{{REPO}}/$repo/g" -e "s/{{TITLE}}/$esc_title/g" \
+      -e "s/{{DATE}}/$TODAY/g" -e "s/{{PRIORITY}}/$pri/g" -e "s#{{OWNER}}#$OWNER#g" \
+      "$ROOT/templates/task.md" > "$f"
+  note "created. Edit Goal / Context / Acceptance criteria, then: wl save \"$(tag "$repo" "$id") new: $title\""
+  echo "$f"
+}
+
+cmd_save() {
+  local msg="${1:-}"
+  [ -n "$msg" ] || msg="worklogs: update $(git -C "$ROOT" status --porcelain "$REPOS" | wc -l | tr -d ' ') file(s)"
+  commit_push "$msg"
+}
+
+cmd_add_repo() { # name url
+  local name="$1" url="$2" d s owner
+  [[ "$name" =~ ^[A-Za-z0-9._-]+$ ]] || die "repo name must be [A-Za-z0-9._-]"
+  d="$REPOS/$name"
+  [ ! -e "$d" ] || die "$d already exists"
+  for s in $STATUSES; do mkdir -p "$d/$s"; touch "$d/$s/.gitkeep"; done
+  owner="$(printf '%s' "$url" | sed -E 's#^(https?://github.com/|git@github.com:)([^/]+)/.*#\2#')"
+  sed -e "s#{{NAME}}#$name#g" -e "s#{{URL}}#$url#g" -e "s#{{OWNER}}#$owner#g" \
+      "$ROOT/templates/repo-readme.md" > "$d/README.md"
+  note "scaffolded $d. Fill README.md, then: wl save \"worklogs: add repo $name\""
+  echo "$d/README.md"
+}
+
+cmd_board() {
+  local repos r s f
+  if [ -n "${1:-}" ]; then repos="$(repo_dir "$1")"; else repos="$(ls -d "$REPOS"/*/ 2>/dev/null || true)"; fi
+  [ -n "$repos" ] || { note "no repos yet. wl add-repo <name> <url>"; return 0; }
+  for r in $repos; do
+    r="${r%/}"
+    echo "== $(basename "$r") =="
+    for s in active review blocked backlog done; do
+      for f in "$r/$s"/*.md; do [ -e "$f" ] && row "$f"; done
+    done
+    echo
+  done
+}
+
+cmd_feed() {
+  git -C "$ROOT" log --format='%h %ad %<(20,trunc)%an %s' --date=short -n "${1:-20}" -- repos/
+}
+
+cmd_inbox() {
+  local r f br base
+  git -C "$ROOT" fetch -q origin 2>/dev/null || note "fetch failed, showing local state"
+  echo "## Waiting for review"
+  for f in "$REPOS"/*/review/*.md; do [ -e "$f" ] && printf '%s  ' "$(basename "$(dirname "$(dirname "$f")")")" && row "$f"; done
+  echo
+  echo "## Blocked"
+  for f in "$REPOS"/*/blocked/*.md; do [ -e "$f" ] && printf '%s  ' "$(basename "$(dirname "$(dirname "$f")")")" && row "$f"; done
+  echo
+  base="origin/$(current_branch)"
+  git -C "$ROOT" rev-parse -q --verify "$base" >/dev/null 2>&1 || base="$(current_branch)"
+  echo "## Branches with task changes not merged into $(current_branch)"
+  for br in $(git -C "$ROOT" branch -r --no-merged "$base" 2>/dev/null | grep -v -- '->' || true); do
+    if [ -n "$(git -C "$ROOT" log --oneline "$base..$br" -- repos/ 2>/dev/null)" ]; then
+      echo "$br"
+      git -C "$ROOT" log --format='   %h %ad %s' --date=short "$base..$br" -- repos/
+    fi
+  done
+}
+
+cmd_merge() {
+  local br="$1"
+  refresh
+  git -C "$ROOT" fetch -q origin "$br"
+  git -C "$ROOT" merge --no-ff --no-edit "origin/$br" \
+    || die "merge conflict. Resolve, keep the later Result, note both in the worklog, then: git commit && wl save"
+  push_retry
+  note "merged $br into $(current_branch)"
+}
+
+# ---------- dispatch ----------
+
+cmd="${1:-}"; [ $# -gt 0 ] && shift
+case "$cmd" in
+  next)     [ $# -ge 1 ] || die "next <repo> [n]";            cmd_next "$@";;
+  claim)    [ $# -ge 2 ] || die "claim <repo> <id>";          cmd_claim "$@";;
+  log)      [ $# -ge 3 ] || die "log <repo> <id> \"<msg>\"";  cmd_log "$@";;
+  finish)   [ $# -ge 2 ] || die "finish <repo> <id> [...]";   cmd_finish "$@";;
+  move)     [ $# -ge 3 ] || die "move <repo> <id> <status>";  cmd_move "$@";;
+  new)      [ $# -ge 2 ] || die "new <repo> \"<title>\"";     cmd_new "$@";;
+  save)     cmd_save "$@";;
+  inbox)    cmd_inbox;;
+  merge)    [ $# -ge 1 ] || die "merge <branch>";             cmd_merge "$@";;
+  add-repo) [ $# -ge 2 ] || die "add-repo <name> <url>";      cmd_add_repo "$@";;
+  board)    cmd_board "$@";;
+  feed)     cmd_feed "$@";;
+  show)     [ $# -ge 2 ] || die "show <repo> <id>";           cmd_show "$@";;
+  -h|--help|help|"") usage;;
+  *) die "unknown command '$cmd' (wl help)";;
+esac
