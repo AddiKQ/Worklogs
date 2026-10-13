@@ -31,6 +31,7 @@ orchestrator
   inbox                                   tasks in review/ and blocked/, plus unmerged worker branches
   merge  <branch>                         merge origin/<branch> into the current branch, push
   add-repo <name> <github-url>            scaffold repos/<name>/ (not committed)
+  snippet  <name>                         print the CLAUDE.md section for the target repository
 
 anyone
   board  [repo]                           every task by status
@@ -256,7 +257,13 @@ cmd_add_repo() { # name url
   sed -e "s#{{NAME}}#$name#g" -e "s#{{URL}}#$url#g" -e "s#{{OWNER}}#$owner#g" \
       "$ROOT/templates/repo-readme.md" > "$d/README.md"
   note "scaffolded $d. Fill README.md, then: wl save \"worklogs: add repo $name\""
+  note "then add 'wl snippet $name' to $name's CLAUDE.md (see PROMPTS.md A3)"
   echo "$d/README.md"
+}
+
+cmd_snippet() { # name
+  [[ "$1" =~ ^[A-Za-z0-9._-]+$ ]] || die "repo name must be [A-Za-z0-9._-]"
+  sed -e "s#{{NAME}}#$1#g" "$ROOT/templates/target-repo-claude-md.md"
 }
 
 cmd_board() {
@@ -321,6 +328,7 @@ case "$cmd" in
   inbox)    cmd_inbox;;
   merge)    [ $# -ge 1 ] || die "merge <branch>";             cmd_merge "$@";;
   add-repo) [ $# -ge 2 ] || die "add-repo <name> <url>";      cmd_add_repo "$@";;
+  snippet)  [ $# -ge 1 ] || die "snippet <name>";             cmd_snippet "$@";;
   board)    cmd_board "$@";;
   feed)     cmd_feed "$@";;
   show)     [ $# -ge 2 ] || die "show <repo> <id>";           cmd_show "$@";;

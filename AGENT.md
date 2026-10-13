@@ -63,6 +63,10 @@ Tell the user the task id, the branch in the target repo, and the branch you pus
 - If you can push to `main`, work on `main`. That is the default and the fastest path.
 - If your session is pinned to a branch (for example `claude/...`), stay on it. The orchestrator merges it. Name the branch in your final message.
 
+## Starting from the target repository instead
+
+If your session began in the code repository, not here: clone Worklogs next to it (`git clone https://github.com/AddiKQ/Worklogs ../Worklogs`, `add_repo AddiKQ/Worklogs` first if refused), stay on its `main`, and run every command above as `../Worklogs/scripts/wl ...`. Skip the clone step in section 3; you are already there. Ready-made prompts are in `PROMPTS.md`.
+
 ## Conflicts
 
 Only the task file changes, so a conflict means two agents touched the same task.

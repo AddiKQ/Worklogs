@@ -55,6 +55,8 @@ scripts/wl add-repo <name> <github-url>
 
 Then fill `repos/<name>/README.md`: how to get the code, branch rules, test command, PR policy. Save with `wl save`.
 
+Then onboard the repository itself so sessions started there report back on their own: `scripts/wl snippet <name>` prints the section to add to that repository's `CLAUDE.md`. `PROMPTS.md` section A3 is a ready-made prompt that does it.
+
 ## See everything
 
 ```bash

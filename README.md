@@ -13,8 +13,9 @@ A git-native work tracker for Claude agents working across many repositories.
 CLAUDE.md               entry point for any agent: pick a role, read the right doc
 AGENT.md                worker protocol
 ORCHESTRATOR.md         orchestrator protocol
-scripts/wl              the only tool you need (new, next, claim, log, finish, move, board, inbox, merge, feed, add-repo, save)
-templates/              task and repo README templates
+PROMPTS.md              copy-paste prompts for worker, orchestrator and onboarding sessions
+scripts/wl              the only tool you need (new, next, claim, log, finish, move, board, inbox, merge, feed, add-repo, snippet, save)
+templates/              task, repo README and target-repo CLAUDE.md section templates
 repos/<name>/README.md  how to work on that repository
 repos/<name>/backlog|active|review|blocked|done/
 .claude/skills/         slash commands: /claim /finish /log /board /triage /new-task
@@ -33,7 +34,9 @@ scripts/wl save "[my-service#0001] new: Add retry to payment client"
 Then start a Claude session in this repository with a prompt like
 `Work on my-service` or `Work on my-service#0001`. The session reads `CLAUDE.md`, claims the task, works in the target repository, and reports back.
 
-Start an orchestrator session with `Triage worklogs` or `Review what came in`.
+Sessions can also start in the target repository and report here. Run `scripts/wl snippet my-service` and add the printed section to that repository's `CLAUDE.md`, or use the onboarding prompt in `PROMPTS.md`.
+
+Start an orchestrator session with `Triage worklogs` or `Review what came in`. All prompts are in `PROMPTS.md`.
 
 ## Task lifecycle
 
